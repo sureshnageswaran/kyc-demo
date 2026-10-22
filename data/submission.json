@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "application_id": "44bcd000-12f0-404f-bf3a-5bb448c6f35f",
+  "submission_id": "db2099f3-b262-49d7-82f7-bf7f3f9093c6",
+  "submitted_at": "2026-10-21T12:00:00Z",
+  "client_reference": "happy-path-003",
+  "applicant": {
+    "given_name": "Avery",
+    "family_name": "Example",
+    "date_of_birth": "1988-04-16",
+    "residential_address": {
+      "line1": "100 Example Lane",
+      "city": "Metuchen",
+      "region": "NJ",
+      "postal_code": "08840",
+      "country_code": "US"
+    }
+  },
+  "documents": [
+    {
+      "document_id": "aa570600-75eb-41e7-9307-530e424f2d9c",
+      "document_type": "drivers_license",
+      "object_key": "applications/44bcd000-12f0-404f-bf3a-5bb448c6f35f/documents/aa570600-75eb-41e7-9307-530e424f2d9c/content.pdf",
+      "size_bytes": 2070259,
+      "sha256": "6eff0d8fdee6c7216955376406fbb81b5ae51e4ab35807bfbd6f37ac7b639200",
+      "client_document_reference": "happy-path-003:d001:o=ok",
+      "original_filename": "A1790083569078-D849392010101-DriversLicense.pdf"
+    },
+    {
+      "document_id": "344b1672-9bc7-413e-a1fd-0ef89785e7f5",
+      "document_type": "other",
+      "object_key": "applications/44bcd000-12f0-404f-bf3a-5bb448c6f35f/documents/344b1672-9bc7-413e-a1fd-0ef89785e7f5/content.pdf",
+      "size_bytes": 4179209,
+      "sha256": "17887c1e6794d6e7db08c01795bf6eccefa45e1dcd5538d7f6a23807aad2b0ba",
+      "client_document_reference": "happy-path-003:d002:o=ok",
+      "original_filename": "A1790083569078-D849392010102-CreditReport.pdf"
+    },
+    {
+      "document_id": "39d9713f-5b18-45b2-880e-9e86001c34fb",
+      "document_type": "utility_bill",
+      "object_key": "applications/44bcd000-12f0-404f-bf3a-5bb448c6f35f/documents/39d9713f-5b18-45b2-880e-9e86001c34fb/content.pdf",
+      "size_bytes": 102518,
+      "sha256": "04b7d11b9beb7f1f13bc20aca0840981ac228203528c1f17f08f8c601cccc1e6",
+      "client_document_reference": "happy-path-003:d003:o=ok",
+      "original_filename": "A1790083569078-D849392010103-UtilityBill.pdf"
+    }
+  ]
+}

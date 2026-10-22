@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "policy_id": "onboarding",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "minimum_average_credit_age",
+      "field": "average_credit_age_months",
+      "operator": "gt",
+      "threshold": 48,
+      "on_failure": "REVIEW",
+      "on_missing": "REVIEW",
+      "on_conflict": "REVIEW"
+    }
+  ]
+}
