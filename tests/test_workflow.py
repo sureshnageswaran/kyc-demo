@@ -159,6 +159,30 @@ async def test_reevaluation_supersedes_review_and_pins_v2(env):
     assert f2.activation_calls == 0
 
 
+async def test_decision_rereads_policy_and_supersedes_when_a_new_one_is_published(env):
+    f = Fakes(credit_age=60, docs=("passport", "utility_bill", "other"), screening=(False, True))
+    f.current = f.versions[1]
+    worker, wf_id, inp = await start(env, f, profile="normal-v1")
+    async with worker:
+        handle = await env.client.start_workflow(KycApplicationWorkflow.run, inp, id=wf_id, task_queue=QUEUE)
+        await env.sleep(1)
+        st = await handle.query("get_processing_state", result_type=ProcessingState)
+        # a newer policy is published while the application waits in review
+        f.current = f.versions[2]
+        with pytest.raises(WorkflowUpdateFailedError) as exc:
+            await handle.execute_update("submit_review_decision", ReviewDecisionRequest(
+                "d1", APP, st.review_task_id, st.evaluation_id, "APPROVE", "alice", "REVIEWER", "ok"))
+        assert exc.value.cause.type == "PolicyChanged"
+        new_st = await handle.query("get_processing_state", result_type=ProcessingState)
+        assert new_st.policy_version == 2 and new_st.evaluation_id != st.evaluation_id
+        assert new_st.review_task_id != st.review_task_id and f.calls["assessment"][-1].supersede_review_task_id
+        # deciding against the new evaluation succeeds; v2 is now the seen current policy
+        await handle.execute_update("submit_review_decision", ReviewDecisionRequest(
+            "d2", APP, new_st.review_task_id, new_st.evaluation_id, "REJECT", "alice", "REVIEWER", "no"))
+        assert (await handle.result()).status == "REJECTED"
+    assert f.activation_calls == 0
+
+
 async def test_technical_document_failure_waits_for_operator_then_retries_only_failed(env):
     f = Fakes()
     f.persistent_doc_failure = {"passport"}

@@ -93,16 +93,16 @@ def policy_objects(version=2, tamper=False):
 async def test_policy_current_and_explicit_modes_and_hash_checks():
     objs, sha = policy_objects()
     a = acts(FakeStorage(objs))
-    snap = await ActivityEnvironment().run(a.app_load_policy, LoadPolicyInput("onboarding"))
+    snap = await a.resolve_policy(LoadPolicyInput("onboarding"))
     assert snap.version == 2 and snap.sha256 == sha
-    snap = await ActivityEnvironment().run(a.app_load_policy, LoadPolicyInput("onboarding", "explicit", 2, sha))
+    snap = await a.resolve_policy(LoadPolicyInput("onboarding", "explicit", 2, sha))
     assert snap.version == 2
     for bad in (LoadPolicyInput("onboarding", "explicit", 2, "f" * 64),):
         with pytest.raises(ApplicationError):
-            await ActivityEnvironment().run(a.app_load_policy, bad)
+            await a.resolve_policy(bad)
     bad_objs, _ = policy_objects(tamper=True)
     with pytest.raises(ApplicationError):                                       # no silent fallback
-        await ActivityEnvironment().run(acts(FakeStorage(bad_objs)).app_load_policy, LoadPolicyInput("onboarding"))
+        await acts(FakeStorage(bad_objs)).resolve_policy(LoadPolicyInput("onboarding"))
 
 
 def doc_ref():
@@ -115,15 +115,17 @@ async def parse(status, body=None, store=None):
 
 
 async def test_document_parse_outcome_mapping():
-    ok = await parse(200, {"fixture_fields": {"given_name": "A"}})
-    assert ok.status == "SUCCEEDED" and ok.extracted_fields == {"given_name": "A"}
-    assert (await parse(400, {"error": {"code": "CORRUPT_PDF"}})).status == "DOCUMENT_ERROR"
-    assert (await parse(422)).error_code == "UNREADABLE_DOCUMENT"
+    ok = await parse(200, {"status": "completed", "confidence": 0.42,
+                           "extracted_data": {"full_name": "Avery Example", "date_of_birth": "1988-04-16"}})
+    assert ok.status == "SUCCEEDED" and ok.extracted_fields == {
+        "given_name": "Avery", "family_name": "Example", "date_of_birth": "1988-04-16", "confidence": 0.42}
+    bad = await parse(200, {"status": "failed", "reason_code": "UNREADABLE_DOCUMENT"})
+    assert bad.status == "DOCUMENT_ERROR" and bad.error_code == "UNREADABLE_DOCUMENT"
     with pytest.raises(ApplicationError) as e:
         await parse(503)
     assert not e.value.non_retryable                                            # retryable
     with pytest.raises(ApplicationError) as e:
-        await parse(200, {"fixture_fields": {}}, store={"k": BYTES + b"x"})     # checksum/size mismatch
+        await parse(200, {"status": "completed", "extracted_data": {}}, store={"k": BYTES + b"x"})  # checksum/size
     assert e.value.non_retryable and e.value.type == errors.DOCUMENT_INTEGRITY
 
 

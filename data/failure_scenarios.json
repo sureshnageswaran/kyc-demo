@@ -1,0 +1,8 @@
+[
+  {"name": "ocr-unreadable-license", "ocr": {"drivers_license": {"scenario": "unreadable"}}},
+  {"name": "ocr-unreadable-bill",    "ocr": {"utility_bill": {"scenario": "unreadable"}}},
+  {"name": "ocr-name-mismatch",      "ocr": {"drivers_license": {"scenario": "name_mismatch"}}},
+  {"name": "ocr-expired-license",    "ocr": {"drivers_license": {"scenario": "expired_id"}}},
+  {"name": "ocr-low-confidence",     "ocr": {"drivers_license": {"scenario": "low_confidence"}}},
+  {"name": "screening-fail",         "screening": {"scenario": "fail"}}
+]

@@ -30,6 +30,9 @@ OPERATORS = {
 DISPOSITIONS = {"REVIEW", "NONE"}
 
 _ADDRESS_FIELDS = ("line1", "city", "region", "postal_code")
+# OCR metadata about a document, not applicant facts: never compared across documents.
+_DOC_META_FIELDS = ("confidence", "document_number", "expiration_date")
+LOW_CONFIDENCE_BELOW = 0.7
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -105,7 +108,8 @@ def _normalise(field_name: str, value: Any) -> Any:
 
 def _doc_facts(doc: EvaluationDocument) -> dict[str, Any]:
     fields = doc.extracted_fields or {}
-    facts = {k: v for k, v in fields.items() if k not in ("address",) and not isinstance(v, (dict, list))}
+    facts = {k: v for k, v in fields.items()
+             if k not in ("address", *_DOC_META_FIELDS) and not isinstance(v, (dict, list))}
     address = fields.get("address")
     if isinstance(address, dict):
         facts.update({k: address[k] for k in _ADDRESS_FIELDS if k in address})
@@ -166,6 +170,28 @@ def evaluate(inp: EvaluateInput) -> EvaluationResult:
                 document_id=doc.document_id,
                 description=f"{doc.document_type} could not be used as evidence ({doc.status}).",
                 evidence={"document_type": doc.document_type, "status": doc.status}))
+
+    # Quality of successfully extracted documents.
+    today = inp.evaluated_at[:10]
+    for doc in sorted(docs, key=lambda d: d.document_id):
+        if doc.status != "SUCCEEDED":
+            continue
+        fields = doc.extracted_fields or {}
+        expires = _norm_date(fields["expiration_date"]) if fields.get("expiration_date") else None
+        if expires and re.fullmatch(r"\d{4}-\d{2}-\d{2}", expires) and expires < today:
+            review = True
+            findings.append(Finding(
+                finding_key=f"doc:{doc.document_id}:expired", source="DOCUMENT", finding_type="DOCUMENT_EXPIRED",
+                severity="WARNING", document_id=doc.document_id,
+                description=f"{doc.document_type} expired on {expires}.", evidence={"expiration_date": expires}))
+        confidence = fields.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < LOW_CONFIDENCE_BELOW:
+            review = True
+            findings.append(Finding(
+                finding_key=f"doc:{doc.document_id}:low_confidence", source="DOCUMENT",
+                finding_type="LOW_OCR_CONFIDENCE", severity="WARNING", document_id=doc.document_id,
+                description=f"OCR confidence {confidence} is below {LOW_CONFIDENCE_BELOW}.",
+                evidence={"confidence": confidence}))
 
     # Required evidence.
     good = [d for d in docs if d.status == "SUCCEEDED"]
@@ -270,6 +296,14 @@ def screening_findings(screening: ScreeningResult) -> list[Finding]:
 
 def screening_requires_review(screening: ScreeningResult | None) -> bool:
     return bool(screening and (screening.potential_ofac_match or screening.pep_flag))
+
+
+def apply_screening(evaluation: EvaluationResult, screening: ScreeningResult | None) -> EvaluationResult:
+    """Fold OFAC/PEP findings into an evaluation; a screening hit forces review (the disposition)."""
+    if screening is not None:
+        evaluation.findings = evaluation.findings + screening_findings(screening)
+        evaluation.review_required = evaluation.review_required or screening_requires_review(screening)
+    return evaluation
 
 
 def review_reason(findings: list[Finding]) -> str:

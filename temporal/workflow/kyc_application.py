@@ -22,14 +22,13 @@ with workflow.unsafe.imports_passed_through():
         AssessmentPersisted,
         AuditEvent,
         DocumentOutcome,
-        EvaluateInput,
+        EvaluateApplicationInput,
         EvaluationDocument,
         EvaluationResult,
         FinalOutcomeInput,
         KycResult,
         KycWorkflowInput,
         LoadedSubmission,
-        LoadPolicyInput,
         LoadSubmissionInput,
         ParseDocumentInput,
         PersistActivationInput,
@@ -55,8 +54,7 @@ ACTIVITY_SETTINGS: dict[str, tuple[int, int]] = {
     "app_start_processing": (10, 5),
     "app_load_submission": (15, 5),
     "app_document_parse": (60, 5),
-    "app_load_policy": (15, 5),
-    "app_evaluate_application": (10, 3),
+    "app_evaluate_application": (20, 5),  # includes the policy read from Garage
     "app_screen_applicant": (30, 5),
     "app_persist_assessment": (10, 5),
     "app_persist_final_outcome": (10, 5),
@@ -113,6 +111,7 @@ class KycApplicationWorkflow:
         self._loaded: LoadedSubmission | None = None
         self._outcomes: dict[str, DocumentOutcome] = {}
         self._policy: PolicySnapshot | None = None
+        self._seen_current: tuple[int, str] | None = None  # (version, sha256) of the last current policy read
         self._eval: EvaluationResult | None = None
         self._screening: ScreeningResult | None = None
         self._review: ReviewTaskSpec | None = None
@@ -174,35 +173,30 @@ class KycApplicationWorkflow:
         await self._enter_stage("DOCUMENT_PARSING")
         await self._parse_documents()
 
-        # 4-6. Policy resolution, evaluation, screening.
-        await self._enter_stage("POLICY_RESOLUTION")
-        self._policy = await self._service_stage(
-            "POLICY_RESOLUTION", "app_load_policy",
-            lambda gen: LoadPolicyInput(policy_id=inp.policy_id, mode="current"),
-            PolicySnapshot, schedule_prefix="load-policy")
+        # 4. Screening first, so the policy is resolved as late as possible.
+        await self._enter_stage("SCREENING")
+        self._screening = await self._service_stage(
+            "SCREENING", "app_screen_applicant",
+            lambda gen: ScreenInput(self.app_id, self._loaded.client_reference,
+                                    self._loaded.declared_applicant,
+                                    invocation_id=f"{self.run_id}:screen-g{self._gen}",
+                                    stub_metadata=(self._loaded.metadata_packet or {}).get("screening")),
+            ScreeningResult, schedule_prefix="screen")
+
+        # 5. One Activity loads the current policy, evaluates, and decides whether review is required.
+        await self._enter_stage("EVALUATION")
         eval_id = str(workflow.uuid4())
+        evaluation = await self._evaluate(eval_id, 1)
+        self._policy, self._eval = evaluation.policy, evaluation
+        self._seen_current = (evaluation.policy.version, evaluation.policy.sha256)
         await self._record_event(
             [self._event("POLICY_RESOLVED", eval_id, details=self._policy_details(self._policy, eval_id))])
         self._st.policy_id, self._st.policy_version = self._policy.policy_id, self._policy.version
         self._st.policy_sha256 = self._policy.sha256
         self._sync_search_attributes()
 
-        await self._enter_stage("EVALUATION")
-        evaluation = await self._evaluate(eval_id, 1, self._policy, "evaluate")
-
-        await self._enter_stage("SCREENING")
-        self._screening = await self._service_stage(
-            "SCREENING", "app_screen_applicant",
-            lambda gen: ScreenInput(self.app_id, self._loaded.client_reference,
-                                    self._loaded.declared_applicant,
-                                    invocation_id=f"{self.run_id}:screen-g{self._gen}"),
-            ScreeningResult, schedule_prefix="screen")
-
-        # 7. Disposition: persist the assessment (and review task) first.
-        evaluation.findings = evaluation.findings + kyc_logic.screening_findings(self._screening)
-        review_required = evaluation.review_required or kyc_logic.screening_requires_review(self._screening)
-        self._eval = evaluation
-        decision = await self._disposition(evaluation, review_required)
+        # 6. Disposition: persist the assessment (and review task) first.
+        decision = await self._disposition(evaluation, evaluation.review_required)
         if decision is None:
             return KycResult(application_id=self.app_id, status="REVIEW_EXPIRED",
                              detail="review expired without a decision")
@@ -431,17 +425,19 @@ class KycApplicationWorkflow:
                                           o.extracted_fields if o else None))
         return out
 
-    async def _evaluate(self, evaluation_id: str, sequence: int, policy: PolicySnapshot,
-                        prefix: str) -> EvaluationResult:
+    def _evaluate_input(self, evaluation_id: str, sequence: int, mode: str = "current",
+                        version: int | None = None, sha256: str | None = None) -> EvaluateApplicationInput:
+        return EvaluateApplicationInput(
+            evaluation_id=evaluation_id, evaluation_sequence=sequence,
+            declared_applicant=self._loaded.declared_applicant, documents=self._evaluation_documents(),
+            evaluated_at=workflow.now().isoformat(), policy_id=self.inp.policy_id, policy_mode=mode,
+            policy_version=version, policy_sha256=sha256, screening=self._screening)
+
+    async def _evaluate(self, evaluation_id: str, sequence: int) -> EvaluationResult:
         evaluation = await self._service_stage(
             "EVALUATION", "app_evaluate_application",
-            lambda gen: EvaluateInput(
-                evaluation_id=evaluation_id, evaluation_sequence=sequence,
-                declared_applicant=self._loaded.declared_applicant,
-                documents=self._evaluation_documents(), policy=policy,
-                evaluated_at=workflow.now().isoformat()),
-            EvaluationResult, schedule_prefix=f"{prefix}-{evaluation_id[:8]}")
-        evaluation.policy = policy
+            lambda gen: self._evaluate_input(evaluation_id, sequence),
+            EvaluationResult, schedule_prefix=f"evaluate-{evaluation_id[:8]}")
         self._st.evaluation_id = evaluation_id
         return evaluation
 
@@ -698,6 +694,40 @@ class KycApplicationWorkflow:
         if expected_eval != r.evaluation_id or (task_id is not None and task_id != r.review_task_id):
             raise self._reject("request names a superseded or unknown evaluation/task", "StaleRequest")
 
+    async def _reread_policy_before_decision(self, req: ReviewDecisionRequest) -> None:
+        """Re-read the current policy JSON when a reviewer decides.
+
+        If nothing new was published since the last current policy read, the decision proceeds. If it changed, the open
+        review is superseded by a fresh evaluation under the new policy and this decision is
+        rejected, so a reviewer's decision is never applied to a policy they did not see.
+        """
+        new_id, seq = str(workflow.uuid4()), self._eval.evaluation_sequence + 1
+        try:
+            evaluation = await self._exec(
+                "app_evaluate_application", self._evaluate_input(new_id, seq, "current"),
+                EvaluationResult, f"review-policy-check-{req.request_id[:8]}")
+        except ActivityError as exc:
+            code, _, _ = _failure_info(exc)
+            raise self._reject(f"the current policy could not be re-read ({code}); retry the decision",
+                               "PolicyCheckFailed")
+        current, pinned = evaluation.policy, self._policy
+        now_current = (current.version, current.sha256)
+        if now_current == (pinned.version, pinned.sha256):
+            self._seen_current = now_current
+            return
+        if now_current == self._seen_current:
+            return  # nothing new published; the review may rest on an operator-pinned version
+        self._seen_current = now_current
+        await self._record_event([self._event(
+            "POLICY_CHANGED_BEFORE_DECISION", req.request_id, actor_type="WORKFLOW", request_id=req.request_id,
+            details={"from_policy_version": pinned.version, "to_policy_version": current.version,
+                     "to_policy_sha256": current.sha256, "rejected_decision_by": req.actor_id})])
+        review = await self._supersede_review(evaluation, req.request_id)
+        raise self._reject(
+            f"policy changed to v{current.version} before this decision; the review was re-evaluated"
+            + (f" (new evaluation {new_id}, task {review.review_task_id}); decide again" if review
+               else " and no review is needed"), "PolicyChanged")
+
     # -- submit_review_decision
 
     @workflow.update(name="submit_review_decision")
@@ -708,6 +738,7 @@ class KycApplicationWorkflow:
             self._check_review_request(req, DECISION_ROLES, req.evaluation_id, req.review_task_id)
             if req.decision not in ("APPROVE", "REJECT"):
                 raise self._reject("decision must be APPROVE or REJECT")
+            await self._reread_policy_before_decision(req)
             accepted_at = workflow.now().isoformat()
             await self._record_event([self._event(
                 "REVIEW_DECISION_ACCEPTED", req.request_id, actor_type="REVIEWER", actor_id=req.actor_id,
@@ -732,13 +763,63 @@ class KycApplicationWorkflow:
 
     # -- request_policy_reevaluation
 
+    async def _supersede_review(self, evaluation: EvaluationResult, request_id: str) -> ReviewTaskSpec | None:
+        """Persist a new evaluation that replaces the open one; returns the new review task, if any.
+
+        Shared by operator re-evaluation and the decision-time policy re-read. Deadlines and notice
+        flags carry forward; this never resets the review budget.
+        """
+        old_eval, old_review = self._eval, self._review
+        new_id, seq = evaluation.evaluation_id, evaluation.evaluation_sequence
+        policy, review_required = evaluation.policy, evaluation.review_required
+        # Deadlines and notice flags carry forward; re-evaluation never resets the budget.
+        review = None
+        if review_required:
+            review = dataclasses.replace(
+                old_review, review_task_id=str(workflow.uuid4()), evaluation_id=new_id,
+                review_key=f"review-{seq}", reason=kyc_logic.review_reason(evaluation.findings))
+        events = [
+            self._event("EVALUATION_COMPLETED", new_id, request_id=request_id, details={
+                **self._policy_details(policy, new_id), "outcome": evaluation.evaluation_outcome,
+                "rule_ids": [r["rule_id"] for r in evaluation.rule_results],
+                "supersedes_evaluation_id": old_eval.evaluation_id}),
+            self._event("REVIEW_SUPERSEDED", old_review.review_task_id, request_id=request_id, details={
+                "review_task_id": old_review.review_task_id, "superseded_by_evaluation_id": new_id}),
+            self._event("ASSESSMENT_PERSISTED", new_id, request_id=request_id, details={
+                "evaluation_id": new_id, "review_required": review_required,
+                "finding_count": len(evaluation.findings)}),
+        ]
+        if review:
+            events.append(self._event("REVIEW_OPENED", review.review_task_id, details={
+                "review_task_id": review.review_task_id, "evaluation_id": new_id,
+                "reason": review.reason, "expires_at": review.expires_at, "carried_forward": True}))
+        await self._persist(
+            "app_persist_assessment",
+            self._assessment_input(
+                evaluation, events=events, review=review, supersede=old_review.review_task_id,
+                status="AWAITING_REVIEW" if review else "PROCESSING",
+                stage="HUMAN_REVIEW" if review else "FINALIZING", include_loaded=False),
+            f"persist-reeval-{new_id[:8]}", AssessmentPersisted)
+
+        self._eval, st = evaluation, self._st
+        self._policy, st.evaluation_id = policy, new_id
+        st.policy_id, st.policy_version, st.policy_sha256 = policy.policy_id, policy.version, policy.sha256
+        if review:
+            self._review, st.review_task_id = review, review.review_task_id
+        else:  # nothing left to review: resume disposition as an automatic approval
+            self._decision = {"decision": "APPROVED", "source": "AUTOMATIC", "evaluation_id": new_id,
+                              "review_task_id": None, "reason_code": "CLEAN_AFTER_REEVALUATION",
+                              "decided_by": "kyc-workflow", "decided_at": workflow.now().isoformat()}
+        self._sync_search_attributes()
+        return review
+
     @workflow.update(name="request_policy_reevaluation")
     async def request_policy_reevaluation(self, req: ReevaluationRequest) -> UpdateOutcome:
         async with self._lock:
             if (dup := self._dedupe(req)) is not None:
                 return dup
             self._check_review_request(req, OPERATOR_ROLES, req.expected_evaluation_id)
-            old_eval, old_review = self._eval, self._review
+            old_eval = self._eval
             await self._record_event([self._event(
                 "POLICY_REEVALUATION_REQUESTED", req.request_id, actor_type="OPERATOR", actor_id=req.actor_id,
                 reason=req.reason, request_id=req.request_id,
@@ -748,66 +829,18 @@ class KycApplicationWorkflow:
 
             new_id, seq = str(workflow.uuid4()), old_eval.evaluation_sequence + 1
             try:
-                # Explicit mode never follows a later current pointer.
-                policy = await self._exec(
-                    "app_load_policy", LoadPolicyInput(req.policy_id, "explicit", req.policy_version,
-                                                       req.policy_sha256),
-                    PolicySnapshot, f"reeval-policy-{new_id[:8]}")
+                # Explicit mode never follows a later current pointer. The Activity folds in the
+                # existing OFAC/PEP findings, which stay binding review inputs.
                 evaluation = await self._exec(
                     "app_evaluate_application",
-                    EvaluateInput(evaluation_id=new_id, evaluation_sequence=seq,
-                                  declared_applicant=self._loaded.declared_applicant,
-                                  documents=self._evaluation_documents(), policy=policy,
-                                  evaluated_at=workflow.now().isoformat()),
+                    self._evaluate_input(new_id, seq, "explicit", req.policy_version, req.policy_sha256),
                     EvaluationResult, f"reeval-evaluate-{new_id[:8]}")
             except ActivityError as exc:
                 code, msg, _ = _failure_info(exc)
                 raise self._reject(f"re-evaluation failed ({code}); the existing assessment is unchanged",
                                    "ReevaluationFailed")
-            evaluation.policy = policy
-            # Existing OFAC/PEP findings stay binding review inputs.
-            evaluation.findings = evaluation.findings + kyc_logic.screening_findings(self._screening)
-            review_required = evaluation.review_required or kyc_logic.screening_requires_review(self._screening)
-
-            # Deadlines and notice flags carry forward; re-evaluation never resets the budget.
-            review = None
-            if review_required:
-                review = dataclasses.replace(
-                    old_review, review_task_id=str(workflow.uuid4()), evaluation_id=new_id,
-                    review_key=f"review-{seq}", reason=kyc_logic.review_reason(evaluation.findings))
-            events = [
-                self._event("EVALUATION_COMPLETED", new_id, request_id=req.request_id, details={
-                    **self._policy_details(policy, new_id), "outcome": evaluation.evaluation_outcome,
-                    "rule_ids": [r["rule_id"] for r in evaluation.rule_results],
-                    "supersedes_evaluation_id": old_eval.evaluation_id}),
-                self._event("REVIEW_SUPERSEDED", old_review.review_task_id, request_id=req.request_id, details={
-                    "review_task_id": old_review.review_task_id, "superseded_by_evaluation_id": new_id}),
-                self._event("ASSESSMENT_PERSISTED", new_id, request_id=req.request_id, details={
-                    "evaluation_id": new_id, "review_required": review_required,
-                    "finding_count": len(evaluation.findings)}),
-            ]
-            if review:
-                events.append(self._event("REVIEW_OPENED", review.review_task_id, details={
-                    "review_task_id": review.review_task_id, "evaluation_id": new_id,
-                    "reason": review.reason, "expires_at": review.expires_at, "carried_forward": True}))
-            await self._persist(
-                "app_persist_assessment",
-                self._assessment_input(
-                    evaluation, events=events, review=review, supersede=old_review.review_task_id,
-                    status="AWAITING_REVIEW" if review else "PROCESSING",
-                    stage="HUMAN_REVIEW" if review else "FINALIZING", include_loaded=False),
-                f"persist-reeval-{new_id[:8]}", AssessmentPersisted)
-
-            self._eval, st = evaluation, self._st
-            self._policy, st.evaluation_id = policy, new_id
-            st.policy_id, st.policy_version, st.policy_sha256 = policy.policy_id, policy.version, policy.sha256
-            if review:
-                self._review, st.review_task_id = review, review.review_task_id
-            else:  # nothing left to review: resume disposition as an automatic approval
-                self._decision = {"decision": "APPROVED", "source": "AUTOMATIC", "evaluation_id": new_id,
-                                  "review_task_id": None, "reason_code": "CLEAN_AFTER_REEVALUATION",
-                                  "decided_by": "kyc-workflow", "decided_at": workflow.now().isoformat()}
-            self._sync_search_attributes()
+            policy, review_required = evaluation.policy, evaluation.review_required
+            review = await self._supersede_review(evaluation, req.request_id)
             return self._remember(req, UpdateOutcome(req.request_id, "ACCEPTED", "REEVALUATED", {
                 "evaluation_id": new_id, "policy_version": policy.version, "review_required": review_required,
                 "review_task_id": review.review_task_id if review else None}))

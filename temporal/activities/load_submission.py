@@ -21,6 +21,9 @@ class LoadSubmission(ActivityBase):
         if not isinstance(applicant, dict):
             raise errors.fatal(errors.SUBMISSION_INVALID, "submission has no declared applicant")
 
+        packet = data.get("metadata_packet")
+        packet = packet if isinstance(packet, dict) else {}
+        ocr_meta = packet.get("ocr") if isinstance(packet.get("ocr"), dict) else {}
         refs: list[DocumentRef] = []
         seen: set[str] = set()
         for d in data.get("documents") or []:
@@ -41,9 +44,11 @@ class LoadSubmission(ActivityBase):
                 bucket=d.get("bucket") or d.get("object_bucket") or ref.bucket, object_key=key,
                 size_bytes=d["size_bytes"], sha256=d["sha256"],
                 client_document_reference=d.get("client_document_reference"),
-                original_filename=d.get("original_filename")))
+                original_filename=d.get("original_filename"),
+                stub_metadata=ocr_meta.get(doc_id) or ocr_meta.get(d.get("document_type", "other"))))
         return LoadedSubmission(
             application_id=inp.application_id, submission_id=inp.submission_id,
             submitted_at=data.get("submitted_at") or utcnow(), declared_applicant=applicant,
             client_reference=data.get("client_reference") or applicant.get("client_reference"),
+            metadata_packet=packet or None,
             documents=sorted(refs, key=lambda r: r.document_id))

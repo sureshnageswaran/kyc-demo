@@ -8,8 +8,8 @@ from temporalio.exceptions import ApplicationError
 
 from temporal import kyc_logic
 from temporal.models import (
-    ActivateAccountInput, ActivationReceipt, AssessmentPersisted, DocumentOutcome, DocumentRef, EvaluateInput,
-    EvaluationResult, FinalOutcomeInput, FinalOutcomePersisted, LoadedSubmission, LoadPolicyInput,
+    ActivateAccountInput, ActivationReceipt, AssessmentPersisted, DocumentOutcome, DocumentRef, EvaluateApplicationInput,
+    EvaluateInput, EvaluationResult, FinalOutcomeInput, FinalOutcomePersisted, LoadedSubmission,
     LoadSubmissionInput, ParseDocumentInput, PersistActivationInput, PersistAssessmentInput, PolicySnapshot,
     RecordEventInput, ScreenInput, ScreeningResult, StartProcessingInput,
 )
@@ -84,15 +84,16 @@ class Fakes:
                 fields = {"average_credit_age_months": f.credit_age}
             return DocumentOutcome(ref.document_id, "SUCCEEDED", fields, attempts=activity.info().attempt)
 
-        @activity.defn(name="app_load_policy")
-        async def load_policy(inp: LoadPolicyInput) -> PolicySnapshot:
-            f.calls["policy"].append(inp.mode)
-            return f.current if inp.mode == "current" else f.versions[inp.version]
-
         @activity.defn(name="app_evaluate_application")
-        async def evaluate(inp: EvaluateInput) -> EvaluationResult:
-            f.calls["evaluate"].append(inp.policy.version)
-            return kyc_logic.evaluate(inp)
+        async def evaluate(inp: EvaluateApplicationInput) -> EvaluationResult:
+            f.calls["policy"].append(inp.policy_mode)
+            policy = f.current if inp.policy_mode == "current" else f.versions[inp.policy_version]
+            f.calls["evaluate"].append(policy.version)
+            ev = kyc_logic.evaluate(EvaluateInput(
+                inp.evaluation_id, inp.evaluation_sequence, inp.declared_applicant, inp.documents, policy,
+                inp.evaluated_at))
+            ev.policy = policy
+            return kyc_logic.apply_screening(ev, inp.screening)
 
         @activity.defn(name="app_screen_applicant")
         async def screen(inp: ScreenInput) -> ScreeningResult:
@@ -127,7 +128,7 @@ class Fakes:
             f.calls["activation"].append(inp.result)
             return {}
 
-        return [start, record, load, parse, load_policy, evaluate, screen, persist, final, activate,
+        return [start, record, load, parse, evaluate, screen, persist, final, activate,
                 persist_activation]
 
     def event_types(self):

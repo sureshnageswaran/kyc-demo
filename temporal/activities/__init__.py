@@ -26,7 +26,7 @@ class KycActivities(
     def all_activities(self) -> list:
         return [
             self.app_start_processing, self.app_record_event, self.app_load_submission,
-            self.app_document_parse, self.app_load_policy, self.app_evaluate_application,
+            self.app_document_parse, self.app_evaluate_application,
             self.app_screen_applicant, self.app_persist_assessment, self.app_persist_final_outcome,
             self.app_activate_account, self.app_persist_activation,
         ]

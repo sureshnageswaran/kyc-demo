@@ -72,6 +72,8 @@ class DocumentRef:
     sha256: str
     client_document_reference: str | None = None
     original_filename: str | None = None
+    # Stub-only: failure instructions for this document from the submission's metadata packet.
+    stub_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -82,6 +84,8 @@ class LoadedSubmission:
     declared_applicant: dict[str, Any]
     documents: list[DocumentRef]
     client_reference: str | None = None
+    # Stub-only: the submission's "metadata_packet" (see docs/kyc_workflow_and_postgres_spec.md).
+    metadata_packet: dict[str, Any] | None = None
 
 
 @dataclass
@@ -184,6 +188,8 @@ class ScreenInput:
     client_reference: str | None
     declared_applicant: dict[str, Any]
     invocation_id: str
+    # Stub-only: failure instructions for screening from the metadata packet.
+    stub_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -198,6 +204,21 @@ class ScreeningResult:
     error_message: str | None = None
     attempts: int = 0
     screened_at: str | None = None
+
+
+@dataclass
+class EvaluateApplicationInput:
+    """Input of app_evaluate_application, which resolves the policy, evaluates and decides disposition."""
+    evaluation_id: str
+    evaluation_sequence: int
+    declared_applicant: dict[str, Any]
+    documents: list[EvaluationDocument]
+    evaluated_at: str
+    policy_id: str
+    policy_mode: str = "current"  # current | explicit (same meaning as LoadPolicyInput.mode)
+    policy_version: int | None = None
+    policy_sha256: str | None = None
+    screening: ScreeningResult | None = None
 
 
 # ---- persistence inputs -----------------------------------------------------
