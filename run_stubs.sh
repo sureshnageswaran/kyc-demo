@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Start the OCR stub (8101) and the OFAC/PEP screening stub (8102); Ctrl-C stops both.
+# Start the OCR (8101), OFAC/PEP screening (8102) and account (8103) stubs; Ctrl-C stops all.
 # Usage: ./run_stubs.sh
 cd "$(dirname "$0")"
 trap 'kill 0' EXIT INT TERM
-.venv/bin/python -m uvicorn stubs.ocr_stub:app --port 8101 2>&1 | sed -u 's/^/[ocr] /' &
-.venv/bin/python -m uvicorn stubs.screening_stub:app --port 8102 2>&1 | sed -u 's/^/[screening] /' &
+for stub in "ocr 8101" "screening 8102" "account 8103"; do
+  set -- $stub
+  .venv/bin/python -m uvicorn "stubs.$1_stub:app" --port "$2" 2>&1 | sed -u "s/^/[$1] /" &
+done
 wait

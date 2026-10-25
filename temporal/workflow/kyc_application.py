@@ -614,7 +614,8 @@ class KycApplicationWorkflow:
             try:
                 # Schedule-To-Close bounds this scheduling generation's retry envelope.
                 receipt = await self._exec(
-                    "app_activate_account", ActivateAccountInput(self.app_id, key, evaluation_id, self._gen),
+                    "app_activate_account", ActivateAccountInput(self.app_id, key, evaluation_id, self._gen,
+                                         (self._loaded.metadata_packet or {}).get("account")),
                     ActivationReceipt, f"activate-g{self._gen}", schedule_to_close=budget)
             except ActivityError as exc:
                 code, msg, _ = _failure_info(exc)

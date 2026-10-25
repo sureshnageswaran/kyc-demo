@@ -339,6 +339,8 @@ class ActivateAccountInput:
     idempotency_key: str
     evaluation_id: str
     generation: int = 0
+    # Stub-only: failure instructions for the account service from the metadata packet.
+    stub_metadata: dict[str, Any] | None = None
 
 
 @dataclass

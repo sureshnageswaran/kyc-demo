@@ -123,6 +123,7 @@ for ((i = 1; i <= COUNT; i++)); do
   printf '  kyc-%s  %s\n' "$app" "$scenario"
 done
 (( STARTED == COUNT )) || { echo "$(( COUNT - STARTED )) failed to start; see output above" >&2; exit 1; }
+FIRST_APP=$(cat "$WORK_DIR"/*.ok | head -1 | cut -f1)
 echo
-echo "Check one with:"
-echo "  .venv/bin/python -m temporal.cli.operator_cli state <application-id>"
+(( COUNT == 1 )) && echo "Check it with:" || echo "Check the first one with:"
+echo "  .venv/bin/python -m temporal.cli.operator_cli state $FIRST_APP"
